@@ -5,3 +5,7 @@
 /tcav_class_test/
 /imagenet_comp_graph_label_strings.txt
 *._*
+
+.env
+*.sh
+*.md

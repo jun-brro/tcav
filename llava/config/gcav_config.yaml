@@ -1,0 +1,37 @@
+model:
+  name: "AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf"
+  device: "cuda:0"
+  
+# Concept activation layers (based on empirical findings for LLaVA models)
+gcav:
+  enabled: false
+  target_layers: [10, 14, 18, 22]  # Multi-layer steering for better coverage
+  target_probability: 0.7          # p_0 threshold for steering
+  min_intervention: true           # Use closed-form epsilon calculation
+  
+concepts:
+  # Safety concepts to steer
+  harmful_symbols:
+    enabled: true
+    direction: "suppress"  # suppress harmful content
+    strength: 0.8
+  
+  safe_content:
+    enabled: true  
+    direction: "amplify"   # amplify safe responses
+    strength: 0.6
+
+# Training parameters for CAV learning
+training:
+  test_size: 0.33
+  regularization: 0.01
+  max_iter: 1000
+  random_state: 42
+  
+# Evaluation settings
+evaluation:
+  batch_size: 8
+  max_new_tokens: 200
+  temperature: 0.2
+  top_p: 0.95
+  metrics: ["safety_rate", "utility_score", "fluency_score"]

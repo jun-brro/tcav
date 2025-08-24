@@ -17,13 +17,15 @@ from inference import GCAVInference
 
 
 class GCAVEvaluator:
+    """Evaluate GCAV steering effectiveness"""
     
-    def __init__(self, model_name: str = "AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf", device: str = "cuda:0", dataset_path: str = "/scratch2/pljh0906/tcav/datasets/hateful_memes"):
+    def __init__(self, model_name: str = "meta-llama/Llama-Guard-3-11B-Vision", device: str = "cuda:0", dataset_path: str = "/scratch2/pljh0906/tcav/datasets/hateful_memes"):
         self.dataset_path = Path(dataset_path)
         self.inference = GCAVInference(model_name, device)
         self.inference.load_model()
         
     def create_test_datasets(self) -> Dict[str, List[Dict]]:
+        """Create test datasets from Hateful Memes for evaluation"""
         
         try:
             # Load evaluation data from Hateful Memes validation set  
@@ -478,7 +480,7 @@ def main():
     parser.add_argument("--gcav-config", default="../config/gcav_config.yaml", help="GCAV config file")
     parser.add_argument("--output", help="Output results file")
     parser.add_argument("--device", default="cuda:0", help="Device to use")
-    parser.add_argument("--model", default="AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf", help="Model name")
+    parser.add_argument("--model", default="meta-llama/Llama-Guard-3-11B-Vision", help="Model name")
     parser.add_argument("--dataset_path", default="/scratch2/pljh0906/tcav/datasets/hateful_memes", help="Path to Hateful Memes dataset")
     
     # Comparison mode

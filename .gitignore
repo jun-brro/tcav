@@ -9,3 +9,13 @@
 .env
 *.sh
 *.md
+models/
+hateful_memes/
+__pycache__/
+artifacts/
+SIUO/data/images/
+siuo_cav_analysis/
+cav_visualization_*/
+*.json
+*_backup/
+*.png

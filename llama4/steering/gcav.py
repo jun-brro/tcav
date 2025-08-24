@@ -21,30 +21,43 @@ class GCAVSteering:
         cav_path = Path(cav_path)
         
         if cav_path.suffix == '.pt':
-            cavs = torch.load(cav_path, map_location=self.device)
+            cavs = torch.load(cav_path, map_location='cpu')  # Load to CPU first
         else:
             with open(cav_path, 'rb') as f:
                 cavs = pickle.load(f)
             
-    
-            for layer in cavs:
-                for key in ['w', 'b', 'v']:
+        # Ensure all CAV tensors are on the correct device
+        for layer in cavs:
+            for key in ['w', 'b', 'v']:
+                if key in cavs[layer]:
                     if not isinstance(cavs[layer][key], torch.Tensor):
                         cavs[layer][key] = torch.tensor(
                             cavs[layer][key], dtype=torch.float32, device=self.device
                         )
+                    else:
+                        # If already a tensor, check and move to device
+                        cavs[layer][key] = cavs[layer][key].to(self.device)
+        
+        print(f"✅ Successfully moved CAV tensors to {self.device}")
         return cavs
     
     def compute_concept_probability(self, activation: torch.Tensor, layer: int) -> torch.Tensor:
         """Compute P_d(e) = σ(w^T * e + b)"""
+        # Handle tuple activations (common in some model architectures)
+        if isinstance(activation, tuple):
+            activation = activation[0]  # Use the first element
+        
         if layer not in self.cavs:
             return torch.tensor(0.5, device=self.device, dtype=activation.dtype)
 
         cav = self.cavs[layer]
-        # Ensure CAV tensors match activation dtype (e.g., float16 for half-precision models)
+        # Ensure CAV tensors match activation dtype AND device  
         activation_dtype = activation.dtype
-        w = cav['w'].to(device=self.device, dtype=activation_dtype)
-        b = cav['b'].to(device=self.device, dtype=activation_dtype)
+        activation_device = activation.device
+        
+        # Force move CAV tensors to activation device
+        w = cav['w'].detach().to(device=activation_device, dtype=activation_dtype)
+        b = cav['b'].detach().to(device=activation_device, dtype=activation_dtype)
         
         # Apply same preprocessing as during training: mean across sequence dimension
         if activation.dim() > 2:
@@ -78,14 +91,21 @@ class GCAVSteering:
         
         where s_0 = σ^(-1)(p_0) = logit(p_0)
         """
+        # Handle tuple activations (common in some model architectures)
+        if isinstance(activation, tuple):
+            activation = activation[0]  # Use the first element
+            
         if layer not in self.cavs:
             return torch.zeros(activation.size(0), device=self.device, dtype=activation.dtype)
         
         cav = self.cavs[layer]
-        # Ensure CAV tensors match activation dtype (e.g., float16 for half-precision models)
+        # Ensure CAV tensors match activation dtype AND device  
         activation_dtype = activation.dtype
-        w = cav['w'].to(device=self.device, dtype=activation_dtype)
-        b = cav['b'].to(device=self.device, dtype=activation_dtype)
+        activation_device = activation.device
+        
+        # Force move CAV tensors to activation device
+        w = cav['w'].detach().to(device=activation_device, dtype=activation_dtype)
+        b = cav['b'].detach().to(device=activation_device, dtype=activation_dtype)
         
         # Apply same preprocessing as during training: mean across sequence dimension
         if activation.dim() > 2:
@@ -100,8 +120,8 @@ class GCAVSteering:
         # Compute current logit: w^T * e + b
         current_logit = torch.matmul(e_flat, w) + b  # [batch]
         
-        # Target logit: s_0 = logit(p_0)
-        target_logit = torch.logit(torch.tensor(target_prob, device=self.device, dtype=activation_dtype))
+        # Target logit: s_0 = logit(p_0) - device synchronization
+        target_logit = torch.logit(torch.tensor(target_prob, device=activation_device, dtype=activation_dtype))
         
         # Compute epsilon based on direction
         w_norm = torch.norm(w)
@@ -132,8 +152,17 @@ class GCAVSteering:
     ) -> torch.Tensor:
         """Apply GCAV intervention: e' = e + ε * v"""
         
+        # Handle tuple activations (common in some model architectures)
+        original_is_tuple = isinstance(activation, tuple)
+        if original_is_tuple:
+            activation = activation[0]  # Use the first element
+        
         if layer not in self.cavs:
-            return activation  # No intervention
+            return (activation,) if original_is_tuple else activation  # No intervention
+        
+        # Debug: Print device information for troubleshooting
+        # if hasattr(activation, 'device'):
+            # print(f"🔧 Intervention Layer {layer}: activation.device={activation.device}")
         
         # Compute intervention strength
         epsilon = self.compute_closed_form_epsilon(
@@ -141,9 +170,10 @@ class GCAVSteering:
         )
         
         # Get normalized CAV direction
-        # Ensure v matches activation dtype (e.g., float16 for half-precision models)
+        # Ensure v matches activation dtype AND device
         activation_dtype = activation.dtype
-        v = self.cavs[layer]['v'].to(device=self.device, dtype=activation_dtype)
+        activation_device = activation.device
+        v = self.cavs[layer]['v'].detach().to(device=activation_device, dtype=activation_dtype)
         
         # Reshape v to match activation dimensions
         # activation: [batch, seq_len, hidden_dim]
@@ -164,17 +194,22 @@ class GCAVSteering:
         if v.size(0) != e_flat.size(1):
             # Handle dimension mismatch (shouldn't happen with proper training)
             print(f"Warning: CAV dimension mismatch. Expected {e_flat.size(1)}, got {v.size(0)}")
-            return activation
+            return (activation,) if original_is_tuple else activation
         
-        # Apply intervention
+        # Apply intervention - synchronize all intermediate tensors with device
         if direction == "suppress":
             epsilon = -epsilon  # Negative direction for suppression
+        
+        # Ensure epsilon is on correct device
+        epsilon = epsilon.to(activation_device)
         
         # Broadcast epsilon and v for batch computation
         epsilon_expanded = epsilon.unsqueeze(1)  # [batch, 1]
         v_expanded = v.unsqueeze(0)  # [1, features]
         
+        # Compute intervention on same device
         intervention = epsilon_expanded * v_expanded  # [batch, features]
+        intervention = intervention.to(activation_device)  # explicit device check
         
         # If original activation was 3D (has sequence dimension), broadcast intervention
         if len(original_shape) == 3:
@@ -183,12 +218,16 @@ class GCAVSteering:
             intervention_reshaped = intervention.view(batch_size, 1, hidden_dim)
             # Broadcast across sequence dimension
             intervention_broadcasted = intervention_reshaped.expand(batch_size, seq_len, hidden_dim)
+            intervention_broadcasted = intervention_broadcasted.to(activation_device)  # device check
             # Apply intervention to original activation
             activation_modified = activation + intervention_broadcasted
         else:
             # For 2D activations, apply directly
             e_modified = e_flat + intervention
             activation_modified = e_modified.view(original_shape)
+        
+        # Final device consistency check
+        activation_modified = activation_modified.to(activation_device)
         
         # Log intervention statistics
         self.intervention_stats.append({
@@ -200,7 +239,7 @@ class GCAVSteering:
             'batch_size': activation.size(0)
         })
         
-        return activation_modified
+        return (activation_modified,) if original_is_tuple else activation_modified
     
     def create_steering_hook(
         self, 

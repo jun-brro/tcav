@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
+from transformers import AutoProcessor, Llama4ForConditionalGeneration
 import requests
 
 def get_sample_images_and_prompts(concept_type="harmful_symbols", n_samples=200, dataset_path="/scratch2/pljh0906/tcav/datasets/hateful_memes"):
+    """Load sample data from Hateful Memes dataset for concept learning"""
     
     try:
         # Load Hateful Memes dataset
@@ -109,24 +110,46 @@ def extract_activations(model, processor, images, prompts, target_layers, device
 
     def make_hook(layer_idx):
         def hook(module, input, output):
+            # Some layers return tuples (e.g., (hidden_states, ...))
+            if isinstance(output, (tuple, list)):
+                output = output[0]
             # Store activation (detach from computation graph)
             activations[layer_idx].append(output.detach().cpu())
         return hook
     
     # Register hooks
     hooks = []
+    
+    # Debug: Print model architecture info
+    print(f"🔍 Model architecture debugging:")
+    print(f"  Model type: {type(model).__name__}")
+    print(f"  Language model type: {type(model.language_model).__name__}")
+    print(f"  Has direct layers: {hasattr(model.language_model, 'layers')}")
+    print(f"  Has nested layers: {hasattr(model.language_model, 'model') and hasattr(model.language_model.model, 'layers') if hasattr(model.language_model, 'model') else False}")
+    
     for layer in target_layers:
+        hook_registered = False
+        
         # Handle different model architectures
         if hasattr(model.language_model, 'layers') and layer < len(model.language_model.layers):
             # Direct access for Qwen2-based models
+            print(f"📌 Registering hook on direct layers[{layer}]")
             hook = model.language_model.layers[layer].register_forward_hook(make_hook(layer))
             hooks.append(hook)
+            hook_registered = True
         elif hasattr(model.language_model, 'model') and hasattr(model.language_model.model, 'layers') and layer < len(model.language_model.model.layers):
             # Nested access for other architectures
+            print(f"📌 Registering hook on nested model.layers[{layer}] (total: {len(model.language_model.model.layers)})")
             hook = model.language_model.model.layers[layer].register_forward_hook(make_hook(layer))
             hooks.append(hook)
-        else:
-            print(f"Warning: Layer {layer} not found in model architecture")
+            hook_registered = True
+        
+        if not hook_registered:
+            print(f"❌ Warning: Layer {layer} not found in model architecture")
+            if hasattr(model.language_model, 'layers'):
+                print(f"   Direct layers available: 0-{len(model.language_model.layers)-1}")
+            elif hasattr(model.language_model, 'model') and hasattr(model.language_model.model, 'layers'):
+                print(f"   Nested layers available: 0-{len(model.language_model.model.layers)-1}")
             continue
     
     model.eval()
@@ -160,18 +183,31 @@ def extract_activations(model, processor, images, prompts, target_layers, device
                     # Use a default test image if invalid input
                     image = Image.new('RGB', (224, 224), color='white')
                 
-                # Prepare input
+                # Prepare input with proper image placeholder for Llama Guard 4
                 conversation = [{
                     "role": "user", 
-                    "content": [{"type": "image"}, {"type": "text", "text": prompt}]
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": prompt}
+                    ]
                 }]
                 
-                text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+                try:
+                    text_prompt = processor.apply_chat_template(
+                        conversation, 
+                        add_generation_prompt=True, 
+                        tokenize=False
+                    )
+                except Exception as e:
+                    # Fallback: manually add image placeholder
+                    print(f"Chat template failed: {e}")
+                    text_prompt = f"<image>\n{prompt}"
+                
                 inputs = processor(text=text_prompt, images=image, return_tensors="pt")
                 inputs = {k: v.to(device) for k, v in inputs.items()}
                 
-                # Forward pass to trigger hooks
-                _ = model(**inputs)
+                # Forward pass to trigger hooks (disable KV cache to avoid DynamicCache errors)
+                _ = model(**inputs, use_cache=False)
                 
             except Exception as e:
                 print(f"Error processing prompt: {prompt[:50]}... - {e}")
@@ -185,8 +221,8 @@ def extract_activations(model, processor, images, prompts, target_layers, device
     processed_activations = {}
     for layer in target_layers:
         if activations[layer]:
-            # Take mean across sequence dimension
-            layer_acts = [act.mean(dim=1).numpy() for act in activations[layer]]
+            # Take mean across sequence dimension and convert bfloat16 to float32 before numpy
+            layer_acts = [act.mean(dim=1).cpu().float().numpy() for act in activations[layer]]
             processed_activations[layer] = np.vstack(layer_acts)
         else:
             print(f"Warning: No activations captured for layer {layer}")
@@ -213,13 +249,33 @@ def main():
     output_dir = Path(args.output_dir) / args.concept
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"Loading LlavaGuard model on {args.device}...")
-    model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-        'AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf',
-        torch_dtype=torch.float16,
-        device_map=args.device
+    print(f"Loading Llama Guard 4 model on {args.device}...")
+    model = Llama4ForConditionalGeneration.from_pretrained(
+        '/scratch2/pljh0906/models/Llama-Guard-4-12B',
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        local_files_only=True,
+        trust_remote_code=True
     )
-    processor = AutoProcessor.from_pretrained('AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf')
+    processor = AutoProcessor.from_pretrained(
+        '/scratch2/pljh0906/models/Llama-Guard-4-12B',
+        local_files_only=True,
+        trust_remote_code=True
+    )
+    
+    # Shim: ensure config objects support dict-like get() to avoid '... has no attribute get' errors
+    def _ensure_config_get(cfg):
+        if cfg is None:
+            return
+        if not hasattr(cfg, 'get'):
+            import types
+            def _get(self, key, default=None):
+                return getattr(self, key, default)
+            cfg.get = types.MethodType(_get, cfg)
+    
+    _ensure_config_get(getattr(model, 'config', None))
+    _ensure_config_get(getattr(model.config, 'text_config', None))
+    _ensure_config_get(getattr(model.config, 'vision_config', None))
     
     print(f"Extracting activations for concept: {args.concept}")
     
@@ -267,7 +323,7 @@ def main():
         "concept": args.concept,
         "layers": target_layers,
         "samples_per_class": args.samples,
-        "model": "AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf"
+        "model": "meta-llama/Llama-Guard-4-12B"
     }
     
     import json

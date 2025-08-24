@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
+from transformers import AutoProcessor, MllamaForConditionalGeneration
 import requests
 
 def get_sample_images_and_prompts(concept_type="harmful_symbols", n_samples=200, dataset_path="/scratch2/pljh0906/tcav/datasets/hateful_memes"):
+    """Load sample data from Hateful Memes dataset for concept learning"""
     
     try:
         # Load Hateful Memes dataset
@@ -185,8 +186,8 @@ def extract_activations(model, processor, images, prompts, target_layers, device
     processed_activations = {}
     for layer in target_layers:
         if activations[layer]:
-            # Take mean across sequence dimension
-            layer_acts = [act.mean(dim=1).numpy() for act in activations[layer]]
+            # Take mean across sequence dimension and convert bfloat16 to float32 before numpy
+            layer_acts = [act.mean(dim=1).cpu().float().numpy() for act in activations[layer]]
             processed_activations[layer] = np.vstack(layer_acts)
         else:
             print(f"Warning: No activations captured for layer {layer}")
@@ -213,13 +214,19 @@ def main():
     output_dir = Path(args.output_dir) / args.concept
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"Loading LlavaGuard model on {args.device}...")
-    model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-        'AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf',
-        torch_dtype=torch.float16,
-        device_map=args.device
+    print(f"Loading Llama Guard 3 Vision model on {args.device}...")
+    model = MllamaForConditionalGeneration.from_pretrained(
+        '/scratch2/pljh0906/models/Llama-Guard-3-11B-Vision',
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        local_files_only=True,
+        trust_remote_code=True
     )
-    processor = AutoProcessor.from_pretrained('AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf')
+    processor = AutoProcessor.from_pretrained(
+        '/scratch2/pljh0906/models/Llama-Guard-3-11B-Vision',
+        local_files_only=True,
+        trust_remote_code=True
+    )
     
     print(f"Extracting activations for concept: {args.concept}")
     
@@ -267,7 +274,7 @@ def main():
         "concept": args.concept,
         "layers": target_layers,
         "samples_per_class": args.samples,
-        "model": "AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf"
+        "model": "meta-llama/Llama-Guard-3-11B-Vision"
     }
     
     import json

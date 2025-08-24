@@ -1,0 +1,3 @@
+[submodule "datasets/SIUO"]
+	path = datasets/SIUO
+	url = https://github.com/sinwang20/SIUO

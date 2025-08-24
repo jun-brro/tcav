@@ -3,13 +3,14 @@ import torch
 import yaml
 from pathlib import Path
 from PIL import Image
-from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
+from transformers import AutoProcessor, MllamaForConditionalGeneration
 import requests
 from steering.gcav import create_gcav_steerer
 
 class GCAVInference:
+    """Llama Guard 3 Vision inference with GCAV steering capabilities"""
     
-    def __init__(self, model_name: str = "AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf", device: str = "cuda:0"):
+    def __init__(self, model_name: str = "meta-llama/Llama-Guard-3-11B-Vision", device: str = "cuda:0"):
         self.device = device
         self.model_name = model_name
         self.model = None
@@ -17,18 +18,23 @@ class GCAVInference:
         self.gcav_steerer = None
         
     def load_model(self):
-        """Load LlavaGuard model and processor"""
+        """Load Llama Guard 3 Vision model and processor"""
         print(f"Loading {self.model_name} on {self.device}...")
         
-        self.model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-            self.model_name,
-            torch_dtype=torch.float16,
-            device_map=self.device,
+        # Use local path instead of model name for faster loading
+        local_path = '/scratch2/pljh0906/models/Llama-Guard-3-11B-Vision'
+        
+        self.model = MllamaForConditionalGeneration.from_pretrained(
+            local_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            local_files_only=True,
             trust_remote_code=True
         )
         
         self.processor = AutoProcessor.from_pretrained(
-            self.model_name,
+            local_path,
+            local_files_only=True,
             trust_remote_code=True
         )
         
@@ -207,7 +213,7 @@ def main():
     parser = argparse.ArgumentParser(description="GCAV-enabled LlavaGuard Inference")
     parser.add_argument("--image", required=True, help="Path to input image")
     parser.add_argument("--prompt", required=True, help="Input prompt/question")
-    parser.add_argument("--model", default="AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf", help="Model name")
+    parser.add_argument("--model", default="meta-llama/Llama-Guard-3-11B-Vision", help="Model name")
     parser.add_argument("--device", default="cuda:0", help="Device to use")
     
     # GCAV arguments

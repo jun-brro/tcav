@@ -3,13 +3,14 @@ import torch
 import yaml
 from pathlib import Path
 from PIL import Image
-from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
+from transformers import AutoProcessor, Llama4ForConditionalGeneration
 import requests
 from steering.gcav import create_gcav_steerer
 
 class GCAVInference:
+    """Llama Guard 4 inference with GCAV steering capabilities"""
     
-    def __init__(self, model_name: str = "AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf", device: str = "cuda:0"):
+    def __init__(self, model_name: str = "meta-llama/Llama-Guard-4-12B", device: str = "cuda:0"):
         self.device = device
         self.model_name = model_name
         self.model = None
@@ -17,20 +18,39 @@ class GCAVInference:
         self.gcav_steerer = None
         
     def load_model(self):
-        """Load LlavaGuard model and processor"""
+        """Load Llama Guard 4 model and processor"""
         print(f"Loading {self.model_name} on {self.device}...")
         
-        self.model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-            self.model_name,
-            torch_dtype=torch.float16,
-            device_map=self.device,
+        # Use local path for faster loading
+        local_path = '/scratch2/pljh0906/models/Llama-Guard-4-12B'
+        
+        self.model = Llama4ForConditionalGeneration.from_pretrained(
+            local_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            local_files_only=True,
             trust_remote_code=True
         )
         
         self.processor = AutoProcessor.from_pretrained(
-            self.model_name,
+            local_path,
+            local_files_only=True,
             trust_remote_code=True
         )
+        
+        # Shim: ensure config objects support dict-like get() to avoid '... has no attribute get' errors
+        def _ensure_config_get(cfg):
+            if cfg is None:
+                return
+            if not hasattr(cfg, 'get'):
+                import types
+                def _get(self, key, default=None):
+                    return getattr(self, key, default)
+                cfg.get = types.MethodType(_get, cfg)
+        
+        _ensure_config_get(getattr(self.model, 'config', None))
+        _ensure_config_get(getattr(self.model.config, 'text_config', None))
+        _ensure_config_get(getattr(self.model.config, 'vision_config', None))
         
         print("Model loaded successfully!")
     
@@ -120,18 +140,26 @@ To provide your assessment use the following json template:
         full_prompt = f"{safety_prompt}\n\nUser content: {prompt}"
         
         # Prepare conversation
-        conversation = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": full_prompt}
-                ]
-            }
-        ]
+        # Process input with proper image placeholder for Llama Guard 4
+        conversation = [{
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": full_prompt}
+            ]
+        }]
         
-        # Process input
-        text_prompt = self.processor.apply_chat_template(conversation, add_generation_prompt=True)
+        try:
+            text_prompt = self.processor.apply_chat_template(
+                conversation, 
+                add_generation_prompt=True, 
+                tokenize=False
+            )
+        except Exception as e:
+            # Fallback: manually add image placeholder
+            print(f"Chat template failed: {e}")
+            text_prompt = f"<image>\n{full_prompt}"
+            
         inputs = self.processor(text=text_prompt, images=image, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
@@ -140,16 +168,19 @@ To provide your assessment use the following json template:
     def generate(self, inputs: dict, **generation_kwargs):
         """Generate response with optional GCAV steering"""
         
-        # Default generation parameters
+        # Default generation parameters (warning-free safe settings)
         default_kwargs = {
             "max_new_tokens": 200,
-            "do_sample": True,
-            "temperature": 0.2,
-            "top_p": 0.95,
-            "top_k": 50,
+            "do_sample": False,  # Greedy decoding for stability
             "num_beams": 1,
-            "use_cache": True,
-            "pad_token_id": self.processor.tokenizer.eos_token_id
+            # Disable KV cache to avoid DynamicCache version mismatches
+            "use_cache": False,
+            "pad_token_id": self.processor.tokenizer.eos_token_id,
+            # Additional safety parameters
+            "repetition_penalty": 1.0,  # No repetition penalty
+            "length_penalty": 1.0,      # No length penalty
+            "output_scores": False,     # Don't compute scores
+            "return_dict_in_generate": False  # Simple output format
         }
         
 
@@ -159,8 +190,23 @@ To provide your assessment use the following json template:
         if self.gcav_steerer:
             self.gcav_steerer.reset_stats()
 
+        # CUDA generation with minimal safety checks
         with torch.no_grad():
-            outputs = self.model.generate(**inputs, **default_kwargs)
+            try:
+                outputs = self.model.generate(**inputs, **default_kwargs)
+            except RuntimeError as e:
+                if "CUDA error" in str(e) or "assertion" in str(e).lower():
+                    print(f"⚠️ CUDA generation error: {str(e)[:100]}...")
+                    print("🔄 Retrying with different parameters...")
+                    # Retry with more conservative parameters
+                    safe_kwargs = default_kwargs.copy()
+                    safe_kwargs.update({
+                        "max_new_tokens": min(100, default_kwargs["max_new_tokens"]),
+                        "do_sample": False,  # Ensure deterministic
+                    })
+                    outputs = self.model.generate(**inputs, **safe_kwargs)
+                else:
+                    raise e
 
         response = self.processor.decode(outputs[0], skip_special_tokens=True)
         
@@ -204,10 +250,10 @@ To provide your assessment use the following json template:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GCAV-enabled LlavaGuard Inference")
+    parser = argparse.ArgumentParser(description="GCAV-enabled Llama Guard 4 Inference")
     parser.add_argument("--image", required=True, help="Path to input image")
     parser.add_argument("--prompt", required=True, help="Input prompt/question")
-    parser.add_argument("--model", default="AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf", help="Model name")
+    parser.add_argument("--model", default="meta-llama/Llama-Guard-4-12B", help="Model name")
     parser.add_argument("--device", default="cuda:0", help="Device to use")
     
     # GCAV arguments

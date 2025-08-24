@@ -1,6 +1,8 @@
 # Core dependencies for GCAV implementation
 torch>=2.0.0
-transformers>=4.35.0
+# Special transformers version for Llama Guard 4
+# Install with: pip install git+https://github.com/huggingface/transformers@v4.51.3-LlamaGuard-preview hf_xet
+# transformers>=4.35.0  # Use special version instead
 Pillow>=9.0.0
 numpy>=1.21.0
 scikit-learn>=1.0.0
@@ -11,6 +13,7 @@ tqdm>=4.64.0
 matplotlib>=3.5.0
 seaborn>=0.11.0
 pandas>=1.5.0
+hf_xet  # Required for Llama Guard 4
 
 # Optional for advanced evaluations  
 nltk>=3.8

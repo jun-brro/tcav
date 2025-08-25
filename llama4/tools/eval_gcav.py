@@ -20,6 +20,10 @@ class GCAVEvaluator:
     """Evaluate GCAV steering effectiveness"""
     
     def __init__(self, model_name: str = "meta-llama/Llama-Guard-4-12B", device: str = "cuda:0", dataset_path: str = "/scratch2/pljh0906/tcav/datasets/hateful_memes"):
+        # Handle None dataset_path with fallback
+        if dataset_path is None:
+            dataset_path = "/scratch2/pljh0906/tcav/datasets/hateful_memes"
+            print(f"Warning: dataset_path was None, using fallback: {dataset_path}")
         self.dataset_path = Path(dataset_path)
         self.inference = GCAVInference(model_name, device)
         self.inference.load_model()
@@ -615,18 +619,22 @@ def main():
             args.output = f"/scratch2/pljh0906/tcav/llama4/{output_filename}"
     
     print(f"\nStarting evaluation:")
-    print(f"Dataset: {args.dataset}")
+    print(f"Dataset: {dataset}")
     print(f"GCAV: {'Enabled' if enable_gcav else 'Disabled'}")
     print(f"Output: {args.output}")
+    print(f"Debug - args.dataset_path: {args.dataset_path}")
+    print(f"Debug - dataset_path: {dataset_path}")
+    print(f"Debug - model: {model}")
+    print(f"Debug - device: {device}")
     
     # Run evaluation
-    evaluator = GCAVEvaluator(args.model, args.device, args.dataset_path)
+    evaluator = GCAVEvaluator(model, device, dataset_path)
     
     try:
         results = evaluator.evaluate_dataset(
-            args.dataset,
+            dataset,
             enable_gcav=enable_gcav,
-            gcav_config_path=args.gcav_config if enable_gcav else None,
+            gcav_config_path=gcav_config_path if enable_gcav else None,
             output_path=args.output
         )
         

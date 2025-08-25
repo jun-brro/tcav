@@ -1,11 +1,11 @@
 model:
-  name: "AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf"
+  name: "meta-llama/Llama-Guard-3-11B-Vision"
   device: "cuda:0"
   
-# Concept activation layers (based on empirical findings for LLaVA models)
+# Concept activation layers (based on empirical findings for Llama3Vision models)
 gcav:
   enabled: true
-  target_layers: [10, 14, 18, 22]  # Multi-layer steering for better coverage
+  target_layers: [20, 25, 30]      # Unified with shell script layers  
   target_probability: 0.3          # Lower threshold due to extreme CAV separation
   min_intervention: true           # Use closed-form epsilon calculation
   
@@ -21,10 +21,25 @@ concepts:
     direction: "amplify"   # amplify safe responses
     strength: 0.6
 
+# Data collection and processing
+data:
+  samples: 200                     # Number of samples to collect
+  concept: "harmful_symbols"       # Default concept name
+  dataset_path: "/scratch2/pljh0906/tcav/datasets/hateful_memes"
+  siuo_data_path: "/scratch2/pljh0906/tcav/datasets/SIUO/data"
+  
+# Output directories
+output:
+  activations_dir: "artifacts/activations"
+  cavs_dir: "artifacts/cavs"
+  visualizations_dir: "artifacts/visualizations"
+  analysis_dir: "artifacts/analysis"
+  results_dir: "results"
+
 # Training parameters for CAV learning
 training:
   test_size: 0.33
-  regularization: 0.01
+  regularization: 0.1              # Unified with shell script
   max_iter: 1000
   random_state: 42
   

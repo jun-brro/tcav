@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 import torch
 import json
+import yaml
 import pickle
 from pathlib import Path
 from sklearn.linear_model import LogisticRegression
@@ -188,58 +189,88 @@ class GCAVTrainer:
         print(f"\nBest layer: {best_layer} (accuracy={best_acc:.3f})")
 
 
+def load_config(config_path):
+    """Load configuration from YAML file"""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
 def main():
     parser = argparse.ArgumentParser(description="Train CAV classifiers")
-    parser.add_argument("--input_dir", required=True, help="Directory with activation files")
-    parser.add_argument("--output_dir", default="../artifacts/cavs", help="Output directory for CAVs")
-    parser.add_argument("--concept", default="", help="Concept name (for output filename)")
-    parser.add_argument("--regularization", type=float, default=0.01, help="L2 regularization")
-    parser.add_argument("--test_size", type=float, default=0.33, help="Test split ratio")
+    parser.add_argument("--config", help="Path to YAML config file")
+    # Keep individual arguments for backward compatibility
+    parser.add_argument("--input_dir", help="Directory with activation files")
+    parser.add_argument("--output_dir", help="Output directory for CAVs")
+    parser.add_argument("--concept", help="Concept name (for output filename)")
+    parser.add_argument("--regularization", type=float, help="L2 regularization")
+    parser.add_argument("--test_size", type=float, help="Test split ratio")
     
     args = parser.parse_args()
+    
+    # Load config if provided
+    if args.config:
+        config = load_config(args.config)
+        # Use config values, with args overriding if provided
+        input_dir = args.input_dir or f"{config['output']['activations_dir']}/{config['data']['concept']}"
+        output_dir = args.output_dir or config['output']['cavs_dir']
+        concept = args.concept or config['data']['concept']
+        regularization = args.regularization or config['training']['regularization']
+        test_size = args.test_size or config['training']['test_size']
+    else:
+        # Use defaults if no config
+        input_dir = args.input_dir or "../artifacts/activations"
+        output_dir = args.output_dir or "../artifacts/cavs"
+        concept = args.concept or ""
+        regularization = args.regularization or 0.01
+        test_size = args.test_size or 0.33
 
     trainer = GCAVTrainer(
-        regularization=args.regularization,
-        test_size=args.test_size
+        regularization=regularization,
+        test_size=test_size
     )
 
-    print(f"Loading activations from {args.input_dir}...")
+    print(f"Loading activations from {input_dir}...")
     try:
-        activations = trainer.load_activations(args.input_dir)
+        activations = trainer.load_activations(input_dir)
     except Exception as e:
+        print(f"Error: {e}")
         return
 
     if not activations:
+        print("No activations loaded.")
         return
 
     cavs = trainer.train_all_layers(activations)
 
     if not cavs:
+        print("No CAVs trained.")
         return
 
     trainer.print_summary()
 
-    output_dir = Path(args.output_dir)
-    concept_name = args.concept if args.concept else Path(args.input_dir).name
-    output_file = output_dir / f"{concept_name}_cavs.pkl"
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    concept_name = concept if concept else Path(input_dir).name
+    output_file = output_path / f"{concept_name}_cavs.pkl"
     
     trainer.save_cavs(output_file)
 
     metadata = {
         "concept": concept_name,
-        "input_dir": str(args.input_dir),
+        "input_dir": str(input_dir),
         "layers": list(cavs.keys()),
         "best_layer": max(cavs.keys(), key=lambda l: cavs[l]['accuracy']),
         "best_accuracy": max(cav['accuracy'] for cav in cavs.values()),
-        "regularization": args.regularization,
-        "test_size": args.test_size
+        "regularization": regularization,
+        "test_size": test_size
     }
     
-    with open(output_dir / f"{concept_name}_metadata.json", "w") as f:
+    with open(output_path / f"{concept_name}_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
     
     print(f"\nTraining complete! Best layer: {metadata['best_layer']} "
           f"(accuracy: {metadata['best_accuracy']:.3f})")
+    print(f"CAVs saved to: {output_file}")
+    print(f"Metadata saved to: {output_path / f'{concept_name}_metadata.json'}")
 
 
 if __name__ == "__main__":

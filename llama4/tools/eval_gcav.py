@@ -473,20 +473,51 @@ class GCAVEvaluator:
         return comparison
 
 
+def load_config(config_path):
+    """Load configuration from YAML file"""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
 def main():
     parser = argparse.ArgumentParser(description="GCAV Evaluation Harness")
-    parser.add_argument("--dataset", default="mixed", choices=["jailbreak", "benign", "mixed"], help="Dataset to evaluate")
-    parser.add_argument("--enable-gcav", type=str, default="false", choices=["true", "false"], help="Enable GCAV steering")
-    parser.add_argument("--gcav-config", default="../config/gcav_config.yaml", help="GCAV config file")
+    parser.add_argument("--config", help="Path to YAML config file")
+    # Keep individual arguments for backward compatibility
+    parser.add_argument("--dataset", choices=["jailbreak", "benign", "mixed"], help="Dataset to evaluate")
+    parser.add_argument("--enable-gcav", type=str, choices=["true", "false"], help="Enable GCAV steering")
+    parser.add_argument("--gcav-config", help="GCAV config file")
     parser.add_argument("--output", help="Output results file")
-    parser.add_argument("--device", default="cuda:0", help="Device to use")
-    parser.add_argument("--model", default="meta-llama/Llama-Guard-4-12B", help="Model name")
-    parser.add_argument("--dataset_path", default="/scratch2/pljh0906/tcav/datasets/hateful_memes", help="Path to Hateful Memes dataset")
+    parser.add_argument("--device", help="Device to use")
+    parser.add_argument("--model", help="Model name")
+    parser.add_argument("--dataset_path", help="Path to Hateful Memes dataset")
     
     # Comparison mode
     parser.add_argument("--compare", nargs=2, metavar=("baseline", "gcav"), help="Compare two result files")
     
     args = parser.parse_args()
+    
+    # Load config if provided
+    config = None
+    default_dataset_path = "/scratch2/pljh0906/tcav/datasets/hateful_memes"
+    
+    if args.config:
+        config = load_config(args.config)
+        # Use config values, with args overriding if provided
+        dataset = args.dataset or "mixed"
+        enable_gcav_str = args.enable_gcav or "false"
+        gcav_config_path = args.gcav_config or args.config  # Use same config for GCAV
+        device = args.device or config.get('model', {}).get('device', "cuda:0")
+        model = args.model or config.get('model', {}).get('name', "meta-llama/Llama-Guard-4-12B")
+        dataset_path = args.dataset_path or config.get('data', {}).get('dataset_path') or default_dataset_path
+        output_dir = config.get('output', {}).get('results_dir', "results")
+    else:
+        # Use defaults if no config
+        dataset = args.dataset or "mixed"
+        enable_gcav_str = args.enable_gcav or "false"
+        gcav_config_path = args.gcav_config or "../config/gcav_config.yaml"
+        device = args.device or "cuda:0"
+        model = args.model or "meta-llama/Llama-Guard-4-12B"
+        dataset_path = args.dataset_path or default_dataset_path
+        output_dir = "results"
     
     # Comparison mode
     if args.compare:
@@ -561,12 +592,27 @@ def main():
         return
     
     # Evaluation mode
-    enable_gcav = args.enable_gcav.lower() == "true"
+    enable_gcav = enable_gcav_str.lower() == "true"
     
-    # Generate output filename if not provided
+    # Generate output filename if not provided or convert relative path to absolute
     if not args.output:
-        gcav_suffix = "_gcav" if enable_gcav else "_baseline"
-        args.output = f"eval_results_{args.dataset}{gcav_suffix}.json"
+        if enable_gcav:
+            output_filename = "results_gcav_tuned.json"
+        else:
+            output_filename = "results_baseline.json"
+        
+        # Use absolute path in llama4 directory
+        args.output = f"/scratch2/pljh0906/tcav/llama4/{output_filename}"
+    else:
+        # Convert relative path to absolute path in llama4 directory
+        output_path_obj = Path(args.output)
+        if not output_path_obj.is_absolute():
+            # Convert relative path like "results/baseline.json" to absolute path
+            if enable_gcav:
+                output_filename = "results_gcav_tuned.json"
+            else:
+                output_filename = "results_baseline.json"
+            args.output = f"/scratch2/pljh0906/tcav/llama4/{output_filename}"
     
     print(f"\nStarting evaluation:")
     print(f"Dataset: {args.dataset}")

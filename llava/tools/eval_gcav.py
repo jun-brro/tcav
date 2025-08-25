@@ -471,20 +471,48 @@ class GCAVEvaluator:
         return comparison
 
 
+def load_config(config_path):
+    """Load configuration from YAML file"""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
 def main():
     parser = argparse.ArgumentParser(description="GCAV Evaluation Harness")
-    parser.add_argument("--dataset", default="mixed", choices=["jailbreak", "benign", "mixed"], help="Dataset to evaluate")
-    parser.add_argument("--enable-gcav", type=str, default="false", choices=["true", "false"], help="Enable GCAV steering")
-    parser.add_argument("--gcav-config", default="../config/gcav_config.yaml", help="GCAV config file")
+    parser.add_argument("--config", help="Path to YAML config file")
+    parser.add_argument("--dataset", choices=["jailbreak", "benign", "mixed"], help="Dataset to evaluate")
+    parser.add_argument("--enable-gcav", type=str, choices=["true", "false"], help="Enable GCAV steering")
+    parser.add_argument("--gcav-config", help="GCAV config file")
     parser.add_argument("--output", help="Output results file")
-    parser.add_argument("--device", default="cuda:0", help="Device to use")
-    parser.add_argument("--model", default="AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf", help="Model name")
-    parser.add_argument("--dataset_path", default="/scratch2/pljh0906/tcav/datasets/hateful_memes", help="Path to Hateful Memes dataset")
+    parser.add_argument("--device", help="Device to use")
+    parser.add_argument("--model", help="Model name")
+    parser.add_argument("--dataset_path", help="Path to Hateful Memes dataset")
     
     # Comparison mode
     parser.add_argument("--compare", nargs=2, metavar=("baseline", "gcav"), help="Compare two result files")
     
     args = parser.parse_args()
+    
+    # Load config if provided
+    config = None
+    if args.config:
+        config = load_config(args.config)
+        # Use config values, with args overriding if provided
+        dataset = args.dataset or "mixed"
+        enable_gcav_str = args.enable_gcav or "false"
+        gcav_config_path = args.gcav_config or args.config  # Use same config for GCAV
+        device = args.device or config['model']['device']
+        model = args.model or config['model']['name']
+        dataset_path = args.dataset_path or config['data']['dataset_path']
+        output_dir = config['output']['results_dir']
+    else:
+        # Use defaults if no config
+        dataset = args.dataset or "mixed"
+        enable_gcav_str = args.enable_gcav or "false"
+        gcav_config_path = args.gcav_config or "../config/gcav_config.yaml"
+        device = args.device or "cuda:0"
+        model = args.model or "AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf"
+        dataset_path = args.dataset_path or "/scratch2/pljh0906/tcav/datasets/hateful_memes"
+        output_dir = "results"
     
     # Comparison mode
     if args.compare:
@@ -559,27 +587,46 @@ def main():
         return
     
     # Evaluation mode
-    enable_gcav = args.enable_gcav.lower() == "true"
+    enable_gcav = enable_gcav_str.lower() == "true"
     
-    # Generate output filename if not provided
+    # Generate output filename if not provided or convert relative path to absolute
     if not args.output:
-        gcav_suffix = "_gcav" if enable_gcav else "_baseline"
-        args.output = f"eval_results_{args.dataset}{gcav_suffix}.json"
+        if enable_gcav:
+            output_filename = "results_gcav_tuned.json"
+        else:
+            output_filename = "results_baseline.json"
+        
+        # Use absolute path in llava directory
+        output_path = f"/scratch2/pljh0906/tcav/llava/{output_filename}"
+    else:
+        # Convert relative path to absolute path in llava directory
+        output_path_obj = Path(args.output)
+        if not output_path_obj.is_absolute():
+            # Convert relative path like "results/baseline.json" to absolute path
+            if enable_gcav:
+                output_filename = "results_gcav_tuned.json"
+            else:
+                output_filename = "results_baseline.json"
+            output_path = f"/scratch2/pljh0906/tcav/llava/{output_filename}"
+        else:
+            output_path = args.output
     
     print(f"\nStarting evaluation:")
-    print(f"Dataset: {args.dataset}")
+    print(f"Dataset: {dataset}")
     print(f"GCAV: {'Enabled' if enable_gcav else 'Disabled'}")
-    print(f"Output: {args.output}")
+    print(f"Output: {output_path}")
+    print(f"Model: {model}")
+    print(f"Device: {device}")
     
     # Run evaluation
-    evaluator = GCAVEvaluator(args.model, args.device, args.dataset_path)
+    evaluator = GCAVEvaluator(model, device, dataset_path)
     
     try:
         results = evaluator.evaluate_dataset(
-            args.dataset,
+            dataset,
             enable_gcav=enable_gcav,
-            gcav_config_path=args.gcav_config if enable_gcav else None,
-            output_path=args.output
+            gcav_config_path=gcav_config_path if enable_gcav else None,
+            output_path=output_path
         )
         
         # Print summary with safe metric access

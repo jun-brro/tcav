@@ -3,6 +3,7 @@ import argparse
 import torch
 import numpy as np
 import json
+import yaml
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
@@ -109,8 +110,15 @@ def extract_activations(model, processor, images, prompts, target_layers, device
 
     def make_hook(layer_idx):
         def hook(module, input, output):
+            # Handle both tensor and tuple outputs
+            if isinstance(output, tuple):
+                # Use the first element of the tuple (usually the main output)
+                activation = output[0]
+            else:
+                activation = output
+            
             # Store activation (detach from computation graph)
-            activations[layer_idx].append(output.detach().cpu())
+            activations[layer_idx].append(activation.detach().cpu())
         return hook
     
     # Register hooks
@@ -195,37 +203,66 @@ def extract_activations(model, processor, images, prompts, target_layers, device
     return processed_activations
 
 
+def load_config(config_path):
+    """Load configuration from YAML file"""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
 def main():
     parser = argparse.ArgumentParser(description="Extract activations for GCAV")
-    parser.add_argument("--concept", default="harmful_symbols", help="Concept to extract")
-    parser.add_argument("--layers", default="10,14,18", help="Comma-separated layer indices")  
-    parser.add_argument("--samples", type=int, default=200, help="Samples per concept")
-    parser.add_argument("--output_dir", default="../artifacts/activations", help="Output directory")
-    parser.add_argument("--device", default="cuda:0", help="Device to use")
-    parser.add_argument("--dataset_path", default="/scratch2/pljh0906/tcav/datasets/hateful_memes", help="Path to Hateful Memes dataset")
+    parser.add_argument("--config", help="Path to YAML config file")
+    # Keep individual arguments for backward compatibility
+    parser.add_argument("--concept", help="Concept to extract")
+    parser.add_argument("--layers", help="Comma-separated layer indices")  
+    parser.add_argument("--samples", type=int, help="Samples per concept")
+    parser.add_argument("--output_dir", help="Output directory")
+    parser.add_argument("--device", help="Device to use")
+    parser.add_argument("--dataset_path", help="Path to Hateful Memes dataset")
     
     args = parser.parse_args()
     
-    # Parse layers
-    target_layers = [int(x.strip()) for x in args.layers.split(",")]
+    # Load config if provided
+    if args.config:
+        config = load_config(args.config)
+        # Use config values, with args overriding if provided
+        concept = args.concept or config['data']['concept']
+        layers = args.layers or ','.join(map(str, config['gcav']['target_layers']))
+        samples = args.samples or config['data']['samples']
+        output_dir = args.output_dir or config['output']['activations_dir']
+        device = args.device or config['model']['device']
+        dataset_path = args.dataset_path or config['data']['dataset_path']
+    else:
+        # Use defaults if no config
+        concept = args.concept or "harmful_symbols"
+        layers = args.layers or "10,14,18"
+        samples = args.samples or 200
+        output_dir = args.output_dir or "../artifacts/activations"
+        device = args.device or "cuda:0"
+        dataset_path = args.dataset_path or "/scratch2/pljh0906/tcav/datasets/hateful_memes"
+    
+        # Parse layers
+    target_layers = [int(x.strip()) for x in layers.split(",")]
     
     # Setup output directory
-    output_dir = Path(args.output_dir) / args.concept
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = Path(output_dir) / concept
+    output_path.mkdir(parents=True, exist_ok=True)
     
-    print(f"Loading LlavaGuard model on {args.device}...")
+    # Get model name from config if available
+    model_name = config['model']['name'] if args.config else 'AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf'
+    
+    print(f"Loading {model_name} model on {device}...")    
     model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-        'AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf',
+        model_name,
         torch_dtype=torch.float16,
-        device_map=args.device
+        device_map=device
     )
-    processor = AutoProcessor.from_pretrained('AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf')
+    processor = AutoProcessor.from_pretrained(model_name)
     
-    print(f"Extracting activations for concept: {args.concept}")
+    print(f"Extracting activations for concept: {concept}")
     
     # Get sample data from Hateful Memes dataset
     pos_prompts, neg_prompts, image_paths = get_sample_images_and_prompts(
-        args.concept, args.samples, args.dataset_path
+        concept, samples, dataset_path
     )
     
     # Extract positive concept activations
@@ -238,7 +275,7 @@ def main():
         pos_images = (image_paths * (len(pos_prompts) // len(image_paths) + 1))[:len(pos_prompts)]
         
     pos_activations = extract_activations(
-        model, processor, pos_images, pos_prompts, target_layers, args.device
+        model, processor, pos_images, pos_prompts, target_layers, device
     )
     
     # Extract negative concept activations  
@@ -250,31 +287,30 @@ def main():
         neg_images = (image_paths * (len(neg_prompts) // len(image_paths) + 1))[:len(neg_prompts)]
         
     neg_activations = extract_activations(
-        model, processor, neg_images, neg_prompts, target_layers, args.device
+        model, processor, neg_images, neg_prompts, target_layers, device
     )
     
     # Save activations
     for layer in target_layers:
         if len(pos_activations[layer]) > 0 and len(neg_activations[layer]) > 0:
-            np.save(output_dir / f"layer_{layer}_positive.npy", pos_activations[layer])
-            np.save(output_dir / f"layer_{layer}_negative.npy", neg_activations[layer])
+            np.save(output_path / f"layer_{layer}_positive.npy", pos_activations[layer])
+            np.save(output_path / f"layer_{layer}_negative.npy", neg_activations[layer])
             print(f"Saved layer {layer}: pos={pos_activations[layer].shape}, neg={neg_activations[layer].shape}")
         else:
             print(f"Warning: Empty activations for layer {layer}")
     
     # Save metadata
     metadata = {
-        "concept": args.concept,
+        "concept": concept,
         "layers": target_layers,
-        "samples_per_class": args.samples,
-        "model": "AIML-TUDA/LlavaGuard-v1.2-7B-OV-hf"
+        "samples_per_class": samples,
+        "model": model_name
     }
     
-    import json
-    with open(output_dir / "metadata.json", "w") as f:
+    with open(output_path / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
     
-    print(f"Activation extraction complete. Saved to {output_dir}")
+    print(f"Activation extraction complete. Saved to {output_path}")
 
 
 if __name__ == "__main__":

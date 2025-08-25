@@ -211,11 +211,20 @@ class GCAVSteering:
         """Create forward hook for steering"""
         
         def hook_fn(module, input, output):
-            # Apply intervention to output
-            modified_output = self.apply_intervention(
-                output, layer, target_prob, direction
-            )
-            return modified_output
+            # Handle tuple outputs (hidden_states, attention_weights, ...)
+            if isinstance(output, tuple):
+                # Apply intervention to the first element (hidden states)
+                modified_hidden_states = self.apply_intervention(
+                    output[0], layer, target_prob, direction
+                )
+                # Return tuple with modified hidden states and other unchanged elements
+                return (modified_hidden_states,) + output[1:]
+            else:
+                # Apply intervention to tensor output directly
+                modified_output = self.apply_intervention(
+                    output, layer, target_prob, direction
+                )
+                return modified_output
         
         return hook_fn
     
@@ -236,15 +245,19 @@ class GCAVSteering:
                 hook_fn = self.create_steering_hook(layer_idx, strength, direction)
                 
                 # Register on the appropriate layer
-                # Handle different model architectures (Qwen2 vs others)
+                # Handle different model architectures (MllamaForConditionalGeneration vs others)
                 layer_module = None
                 
-                if hasattr(model.language_model, 'layers') and layer_idx < len(model.language_model.layers):
-                    # Direct access for Qwen2-based models
-                    layer_module = model.language_model.layers[layer_idx]
-                elif hasattr(model.language_model, 'model') and hasattr(model.language_model.model, 'layers') and layer_idx < len(model.language_model.model.layers):
-                    # Nested access for other architectures
+                # For Llama3Vision (MllamaForConditionalGeneration)
+                if hasattr(model, 'language_model') and hasattr(model.language_model, 'model') and hasattr(model.language_model.model, 'layers') and layer_idx < len(model.language_model.model.layers):
+                    # Access: model.language_model.model.layers[idx]
                     layer_module = model.language_model.model.layers[layer_idx]
+                elif hasattr(model.language_model, 'layers') and layer_idx < len(model.language_model.layers):
+                    # Direct access for some architectures
+                    layer_module = model.language_model.layers[layer_idx]
+                elif hasattr(model, 'model') and hasattr(model.model, 'layers') and layer_idx < len(model.model.layers):
+                    # Alternative access pattern
+                    layer_module = model.model.layers[layer_idx]
                 
                 if layer_module is not None:
                     hook = layer_module.register_forward_hook(hook_fn)

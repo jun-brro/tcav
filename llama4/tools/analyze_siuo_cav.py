@@ -2,6 +2,7 @@ import argparse
 import json
 import numpy as np
 import torch
+import yaml
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
@@ -109,15 +110,18 @@ class SIUOCAVAnalyzer:
         
         def make_hook(layer_idx):
             def hook(module, input, output):
-                # Some layers return tuples (e.g., (hidden_states, ...))
-                if isinstance(output, (tuple, list)):
-                    output = output[0]
-                # Apply same preprocessing as training: mean across sequence dimension
-                if output.dim() > 2:
-                    pooled_output = output.mean(dim=1)  # [batch, features]
-                else:
-                    pooled_output = output
-                activations[layer_idx].append(pooled_output.detach().cpu())
+                try:
+                    # Some layers return tuples (e.g., (hidden_states, ...))
+                    if isinstance(output, (tuple, list)):
+                        output = output[0]
+                    # Apply same preprocessing as training: mean across sequence dimension
+                    if output.dim() > 2:
+                        pooled_output = output.mean(dim=1)  # [batch, features]
+                    else:
+                        pooled_output = output
+                    activations[layer_idx].append(pooled_output.detach().cpu())
+                except Exception as e:
+                    print(f"Error in hook for layer {layer_idx}: {e}")
             return hook
         
         # Register hooks
@@ -183,11 +187,16 @@ class SIUOCAVAnalyzer:
         processed_activations = {}
         for layer in target_layers:
             if activations[layer]:
-                # Convert bfloat16 to float32 before numpy conversion
-                layer_acts = [act.cpu().float().numpy() for act in activations[layer]]
-                processed_activations[layer] = np.vstack(layer_acts)
-                print(f"SIUO Layer {layer}: {processed_activations[layer].shape}")
+                try:
+                    # Convert bfloat16 to float32 before numpy conversion
+                    layer_acts = [act.cpu().float().numpy() for act in activations[layer]]
+                    processed_activations[layer] = np.vstack(layer_acts)
+                    print(f"SIUO Layer {layer}: {processed_activations[layer].shape}")
+                except Exception as e:
+                    print(f"Error processing activations for layer {layer}: {e}")
+                    processed_activations[layer] = np.array([])
             else:
+                print(f"No activations captured for layer {layer}")
                 processed_activations[layer] = np.array([])
         
         return processed_activations
@@ -233,7 +242,7 @@ class SIUOCAVAnalyzer:
         
         if len(siuo_acts) == 0:
             print(f"No SIUO activations found for layer {layer}")
-            return
+            return None, None
         
         # Combine all activations
         all_activations = np.vstack([
@@ -310,13 +319,13 @@ class SIUOCAVAnalyzer:
         train_pos = np.load(training_path / f"layer_{layer}_positive.npy")
         train_neg = np.load(training_path / f"layer_{layer}_negative.npy")
         
-        # Get SIUO activations
+                # Get SIUO activations
         siuo_acts = siuo_activations[layer]
         
         if len(siuo_acts) == 0:
             print(f"No SIUO activations found for layer {layer}")
-            return
-        
+            return None, None, None
+
         # Compute probabilities for all data
         # Training probabilities
         cav = self.cavs[layer]
@@ -581,11 +590,21 @@ class SIUOCAVAnalyzer:
         for layer in target_layers:
             print(f"\nAnalyzing layer {layer}...")
             
+            # Check if we have activations for this layer
+            if layer not in siuo_activations or len(siuo_activations[layer]) == 0:
+                print(f"Skipping layer {layer} - no activations found")
+                continue
+                
             # Combined visualization (original)
             reduced_acts, labels = self.create_combined_visualization(
                 siuo_data, siuo_activations, training_activations_path, layer, output_dir
             )
             
+            # Skip enhanced visualization if no activations
+            if reduced_acts is None:
+                print(f"Skipping enhanced visualization for layer {layer} - no data")
+                continue
+                
             # Enhanced visualization with probability mapping
             enhanced_acts, enhanced_probs, type_labels = self.create_enhanced_combined_visualization(
                 siuo_data, siuo_activations, training_activations_path, layer, output_dir
@@ -601,8 +620,8 @@ class SIUOCAVAnalyzer:
             detailed_samples = self.analyze_samples_with_probabilities(siuo_data, probs)
             
             results[layer] = {
-                'concept_probabilities': category_probs,
-                'num_samples': len(siuo_activations[layer]),
+                'concept_probabilities': category_probs if category_probs else {},
+                'num_samples': len(siuo_activations[layer]) if layer in siuo_activations else 0,
                 'detailed_samples': detailed_samples
             }
         

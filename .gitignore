@@ -19,3 +19,4 @@ cav_visualization_*/
 *.json
 *_backup/
 *.png
+cav_visualization/

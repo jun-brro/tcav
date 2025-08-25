@@ -211,11 +211,20 @@ class GCAVSteering:
         """Create forward hook for steering"""
         
         def hook_fn(module, input, output):
-            # Apply intervention to output
-            modified_output = self.apply_intervention(
-                output, layer, target_prob, direction
-            )
-            return modified_output
+            # Handle tuple outputs (hidden_states, attention_weights, ...)
+            if isinstance(output, tuple):
+                # Apply intervention to the first element (hidden states)
+                modified_hidden_states = self.apply_intervention(
+                    output[0], layer, target_prob, direction
+                )
+                # Return tuple with modified hidden states and other unchanged elements
+                return (modified_hidden_states,) + output[1:]
+            else:
+                # Apply intervention to tensor output directly
+                modified_output = self.apply_intervention(
+                    output, layer, target_prob, direction
+                )
+                return modified_output
         
         return hook_fn
     
